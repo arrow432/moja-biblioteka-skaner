@@ -5,7 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#173b2a">
   <title>Moja Biblioteka — skaner ISBN</title>
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <!-- ZXing Browser: obsługa kamery i kodów kreskowych w przeglądarce -->
+  <script src="https://unpkg.com/@zxing/browser@latest"></script>
   <style>
     :root { color-scheme: light; --green:#173b2a; --pale:#edf5ef; --line:#d6e0d8; }
     * { box-sizing:border-box }
@@ -13,21 +14,26 @@
     header { background:var(--green); color:white; padding:18px 16px; }
     header h1 { font-size:21px; margin:0 0 4px; }
     header p { margin:0; opacity:.85; font-size:13px; }
-    main { max-width:620px; margin:auto; padding:16px; }
+    main { max-width:720px; margin:auto; padding:16px; }
     .card { background:white; border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:14px; box-shadow:0 2px 8px #183b2910; }
     label { display:block; font-size:13px; font-weight:650; margin:10px 0 5px; }
-    input { width:100%; min-height:46px; padding:10px 12px; border:1px solid #b9c8bd; border-radius:10px; font-size:16px; background:white; }
+    input, select { width:100%; min-height:46px; padding:10px 12px; border:1px solid #b9c8bd; border-radius:10px; font-size:16px; background:white; }
     button { border:0; border-radius:11px; padding:13px 16px; min-height:46px; font-size:15px; font-weight:700; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
     .primary { background:var(--green); color:white; width:100%; }
     .secondary { background:var(--pale); color:var(--green); }
     .row { display:flex; gap:9px; }
     .row button { flex:1; }
-    #reader { width:100%; overflow:hidden; border-radius:12px; }
-    #reader video { border-radius:12px; }
+    #cameraBox { position:relative; width:100%; min-height:220px; margin-top:14px; overflow:hidden; border-radius:14px; background:#111; display:flex; align-items:center; justify-content:center; }
+    #preview { display:block; width:100%; height:auto; min-height:220px; max-height:58vh; object-fit:cover; background:#111; }
+    #aim { position:absolute; left:8%; right:8%; top:37%; height:26%; border:3px solid #46e08a; border-radius:9px; box-shadow:0 0 0 9999px #0004; pointer-events:none; }
+    #aim:after { content:"Ustaw kod kreskowy w tej ramce"; position:absolute; left:0; right:0; bottom:-32px; text-align:center; color:white; font-size:12px; font-weight:700; text-shadow:0 1px 3px #000; }
+    #cameraPlaceholder { position:absolute; color:white; text-align:center; padding:20px; font-size:14px; pointer-events:none; }
     #status { padding:12px; background:var(--pale); border-radius:10px; font-size:14px; min-height:44px; margin-top:12px; white-space:pre-wrap; }
     .small { color:#5b6b60; font-size:12px; line-height:1.5; }
     details summary { font-weight:700; cursor:pointer; }
     .hidden { display:none; }
+    @media (max-width:480px) { main { padding:10px; } .card { padding:13px; } }
   </style>
 </head>
 <body>
@@ -41,9 +47,19 @@
       <button class="primary" id="startBtn" onclick="startScanner()">Uruchom aparat i skanuj</button>
       <button class="secondary" id="stopBtn" onclick="stopScanner()" disabled>Stop</button>
     </div>
-    <div id="reader" style="margin-top:14px"></div>
-    <div id="status" role="status">Wpisz ustawienia po rozwinięciu sekcji poniżej, a następnie uruchom aparat.</div>
-    <p class="small">Ustaw tylny aparat telefonu, skieruj go na kod kreskowy z tyłu książki. Po każdym odczycie skaner zatrzyma się na chwilę, aby uniknąć wielokrotnego dodania tej samej pozycji.</p>
+
+    <label for="cameraSelect">Kamera</label>
+    <select id="cameraSelect" aria-label="Wybierz kamerę">
+      <option value="">Automatyczny wybór tylnej kamery</option>
+    </select>
+
+    <div id="cameraBox">
+      <video id="preview" autoplay muted playsinline></video>
+      <div id="aim"></div>
+      <div id="cameraPlaceholder">Podgląd kamery pojawi się tutaj po uruchomieniu skanera.</div>
+    </div>
+    <div id="status" role="status">Wpisz ustawienia połączenia poniżej, a następnie uruchom aparat.</div>
+    <p class="small">Ustaw kod kreskowy ISBN w zielonej ramce. Skaner rozpoznaje EAN-13 i inne popularne kody kreskowe. Po odczycie zatrzyma się i wyśle ISBN do arkusza.</p>
   </section>
 
   <section class="card">
@@ -70,13 +86,12 @@
       <label for="token">Prywatny token zapisu</label>
       <input id="token" type="password" autocomplete="off" placeholder="Wklej token z Apps Script">
       <button class="primary" style="margin-top:12px" onclick="saveSettings()">Zapisz ustawienia na tym telefonie</button>
-      <p class="small">Adres i token są zapisywane lokalnie w przeglądarce tego telefonu. Nie umieszczaj tokenu w publicznym kodzie strony ani nie udostępniaj go innym osobom.</p>
+      <p class="small">Adres i token są zapisywane lokalnie w przeglądarce tego urządzenia. Nie umieszczaj tokenu w publicznym kodzie strony ani nie udostępniaj go innym osobom.</p>
     </details>
   </section>
   <p class="small">Wymagane połączenie z internetem. Aparat działa w bezpiecznym kontekście HTTPS. Dane biblioteki są zapisywane w Twoim arkuszu Google.</p>
 </main>
 
-<!-- Formularz wysyłany do Apps Script w ukrytej ramce — omija ograniczenia CORS. -->
 <iframe name="postFrame" id="postFrame" class="hidden"></iframe>
 <form id="postForm" method="post" target="postFrame" class="hidden">
   <input name="isbn" id="postIsbn">
@@ -86,7 +101,8 @@
 </form>
 
 <script>
-  let scanner = null;
+  let codeReader = null;
+  let cameraControls = null;
   let busy = false;
   const $ = id => document.getElementById(id);
   const status = message => $('status').textContent = message;
@@ -95,6 +111,7 @@
     $('endpoint').value = localStorage.getItem('library_endpoint') || '';
     $('token').value = localStorage.getItem('library_token') || '';
   }
+
   function saveSettings() {
     const endpoint = $('endpoint').value.trim();
     const token = $('token').value.trim();
@@ -105,44 +122,76 @@
     if (!token) { status('Wklej prywatny token.'); return; }
     localStorage.setItem('library_endpoint', endpoint);
     localStorage.setItem('library_token', token);
-    status('Ustawienia zapisane na tym telefonie.');
+    status('Ustawienia zapisane na tym urządzeniu.');
+  }
+
+  async function populateCameras() {
+    if (!window.ZXingBrowser || !ZXingBrowser.BrowserCodeReader) {
+      throw new Error('Nie udało się załadować biblioteki ZXing. Sprawdź połączenie z internetem i odśwież stronę.');
+    }
+    const devices = await ZXingBrowser.BrowserCodeReader.listVideoInputDevices();
+    const select = $('cameraSelect');
+    select.innerHTML = '';
+    if (!devices.length) throw new Error('Przeglądarka nie wykryła żadnej kamery.');
+    devices.forEach((device, index) => {
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      option.textContent = device.label || ('Kamera ' + (index + 1));
+      select.appendChild(option);
+    });
+    const rear = devices.find(d => /back|rear|environment|tyl|world/i.test(d.label || ''));
+    if (rear) select.value = rear.deviceId;
+    return devices;
   }
 
   async function startScanner() {
-    if (!window.Html5Qrcode) {
-      status('Nie udało się załadować biblioteki skanera. Sprawdź internet i odśwież stronę.');
-      return;
-    }
+    if (busy) return;
     if (!localStorage.getItem('library_endpoint') || !localStorage.getItem('library_token')) {
       status('Najpierw uzupełnij adres Apps Script i token w sekcji Ustawienia.');
       return;
     }
+    $('startBtn').disabled = true;
+    $('stopBtn').disabled = false;
+    $('cameraPlaceholder').textContent = 'Uruchamiam kamerę…';
+    status('Wykrywam kamery i uruchamiam podgląd…');
     try {
-      scanner = scanner || new Html5Qrcode('reader');
-      $('startBtn').disabled = true;
-      $('stopBtn').disabled = false;
-      status('Uruchamiam aparat… Jeśli przeglądarka zapyta o dostęp do kamery, wybierz Zezwól.');
-      await scanner.start(
-        { facingMode: 'environment' },
-        { fps: 10, qrbox: { width: 280, height: 150 },
-          formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A] },
-        onScanSuccess,
-        () => {}
+      const devices = await populateCameras();
+      const chosenId = $('cameraSelect').value || (devices[0] && devices[0].deviceId);
+      codeReader = new ZXingBrowser.BrowserMultiFormatReader();
+      const video = $('preview');
+      cameraControls = await codeReader.decodeFromVideoDevice(
+        chosenId,
+        video,
+        (result, error, controls) => {
+          if (result && !busy) {
+            const textValue = result.getText ? result.getText() : String(result.text || result);
+            onScanSuccess(textValue);
+          }
+        }
       );
-      status('Aparat działa. Ustaw kod kreskowy w polu skanowania.');
+      $('cameraPlaceholder').classList.add('hidden');
+      status('Kamera działa. Umieść kod ISBN w zielonej ramce.');
     } catch (err) {
       $('startBtn').disabled = false;
       $('stopBtn').disabled = true;
-      status('Nie można uruchomić aparatu: ' + err + '\nSprawdź uprawnienia kamery i otwórz stronę w Chrome przez HTTPS.');
+      $('cameraPlaceholder').classList.remove('hidden');
+      $('cameraPlaceholder').textContent = 'Nie udało się uruchomić podglądu kamery.';
+      status('Problem z uruchomieniem skanera: ' + (err && err.message ? err.message : err) +
+        '\nSprawdź uprawnienia kamery i połączenie z internetem. Możesz nadal wpisywać ISBN ręcznie.');
+      try { if (cameraControls) cameraControls.stop(); } catch (_) {}
+      cameraControls = null;
     }
   }
 
   async function stopScanner() {
-    if (scanner && scanner.isScanning) {
-      try { await scanner.stop(); } catch (e) {}
-    }
+    try { if (cameraControls) cameraControls.stop(); } catch (_) {}
+    cameraControls = null;
+    try { if (codeReader && codeReader.reset) codeReader.reset(); } catch (_) {}
+    codeReader = null;
     $('startBtn').disabled = false;
     $('stopBtn').disabled = true;
+    $('cameraPlaceholder').classList.remove('hidden');
+    $('cameraPlaceholder').textContent = 'Podgląd kamery zatrzymany.';
     status('Skaner zatrzymany.');
   }
 
@@ -155,8 +204,16 @@
     }
     busy = true;
     $('isbn').value = isbn;
-    await stopScanner();
+    try { if (cameraControls) cameraControls.stop(); } catch (_) {}
+    cameraControls = null;
+    try { if (codeReader && codeReader.reset) codeReader.reset(); } catch (_) {}
+    codeReader = null;
+    $('startBtn').disabled = false;
+    $('stopBtn').disabled = true;
+    $('cameraPlaceholder').classList.remove('hidden');
+    $('cameraPlaceholder').textContent = 'Odczytano ISBN: ' + isbn;
     sendIsbn(isbn);
+    setTimeout(() => { busy = false; }, 2500);
   }
 
   function isValidIsbn(s) {
@@ -188,7 +245,6 @@
     $('postPosition').value = $('position').value.trim();
     $('postForm').submit();
     status('Wysłano ISBN ' + isbn + ' do arkusza. Poczekaj chwilę i sprawdź zakładkę Biblioteka. Każdy skan tworzy osobny egzemplarz.');
-    setTimeout(() => { busy = false; }, 2500);
   }
 
   function submitManual() {
@@ -199,6 +255,7 @@
     sendIsbn(isbn);
     setTimeout(() => { busy = false; }, 2500);
   }
+
   function clearIsbn() { $('isbn').value = ''; status('Pole ISBN wyczyszczone.'); }
   window.addEventListener('load', loadSettings);
 </script>

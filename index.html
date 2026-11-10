@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="pl">
 <head>
@@ -6,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#173b2a">
   <title>Moja Biblioteka — skaner ISBN</title>
+  <!-- ZXing Browser: obsługa kamery i kodów kreskowych w przeglądarce -->
   <script src="https://unpkg.com/@zxing/browser@latest"></script>
   <style>
     :root { color-scheme: light; --green:#173b2a; --pale:#edf5ef; --line:#d6e0d8; }
@@ -39,7 +39,7 @@
 <body>
 <header>
   <h1>📚 Moja Biblioteka</h1>
-  <p>Skaner kodów ISBN • Android</p>
+  <p>Skaner kodów ISBN • Android • wersja 3 (HOTWAV)</p>
 </header>
 <main>
   <section class="card">
@@ -105,6 +105,8 @@
   let cameraControls = null;
   let activeStream = null;
   let busy = false;
+  let launchNumber = 0;
+  let manualCameraChoice = false;
   const $ = id => document.getElementById(id);
   const status = message => $('status').textContent = message;
 
@@ -126,113 +128,119 @@
     status('Ustawienia zapisane na tym urządzeniu.');
   }
 
+  // Camera 2 jest wadliwa w Chrome na tym tablecie. Nie wybieramy jej.
+  function isBadCamera(label) {
+    return /camera\s*2\b/i.test(label || '');
+  }
+  function isGoodRearCamera(label) {
+    return /camera\s*0\b/i.test(label || '') && /back|rear|environment|tyl/i.test(label || '');
+  }
   async function populateCameras() {
-    if (!window.ZXingBrowser || !ZXingBrowser.BrowserCodeReader) {
-      throw new Error('Nie udało się załadować biblioteki ZXing. Sprawdź połączenie z internetem i odśwież stronę.');
-    }
-    const devices = await ZXingBrowser.BrowserCodeReader.listVideoInputDevices();
+    const devices = (await navigator.mediaDevices.enumerateDevices())
+      .filter(d => d.kind === 'videoinput');
+    if (!devices.length) throw new Error('Nie wykryto kamer w Chrome.');
     const select = $('cameraSelect');
+    const previous = manualCameraChoice ? select.value : '';
     select.innerHTML = '';
-    if (!devices.length) throw new Error('Przeglądarka nie wykryła żadnej kamery.');
     devices.forEach((device, index) => {
       const option = document.createElement('option');
       option.value = device.deviceId;
-      option.textContent = device.label || ('Kamera ' + (index + 1));
+      option.textContent = device.label || ('Kamera ' + (index + 1) + ' — nazwa niedostępna');
+      if (isBadCamera(device.label)) {
+        option.disabled = true;
+        option.textContent += ' (zablokowana — czarny ekran)';
+      }
       select.appendChild(option);
     });
-    const rear = devices.find(d => /back|rear|environment|tyl|world/i.test(d.label || ''));
-    if (rear) select.value = rear.deviceId;
-    return devices;
+    const good = devices.find(d => isGoodRearCamera(d.label));
+    const saved = localStorage.getItem('library_camera_id');
+    const allowed = devices.filter(d => !isBadCamera(d.label));
+    const manual = allowed.find(d => d.deviceId === previous);
+    const stored = allowed.find(d => d.deviceId === saved);
+    const chosen = manual || good || stored;
+    if (chosen) select.value = chosen.deviceId;
+    else select.value = ''; // Bez nazw nie zgadujemy, która kamera jest właściwa.
+    return { devices, chosen };
   }
 
+  $('cameraSelect').addEventListener('change', () => {
+    manualCameraChoice = true;
+    const selected = $('cameraSelect').selectedOptions[0];
+    if (selected && !selected.disabled) {
+      localStorage.setItem('library_camera_id', $('cameraSelect').value);
+    }
+  });
+
   async function startScanner() {
-    if (busy) return;
+    if (busy || $('startBtn').disabled) return;
     if (!localStorage.getItem('library_endpoint') || !localStorage.getItem('library_token')) {
       status('Najpierw uzupełnij adres Apps Script i token w sekcji Ustawienia.');
       return;
     }
+    const launch = ++launchNumber;
     $('startBtn').disabled = true;
     $('stopBtn').disabled = false;
     $('cameraPlaceholder').classList.remove('hidden');
-    $('cameraPlaceholder').textContent = 'Proszę czekać — uruchamiam aparat…';
-    status('Proszę czekać — proszę o dostęp do kamery…');
-
+    $('cameraPlaceholder').textContent = 'Uruchamiam wybraną kamerę…';
+    status('Wykrywam kamery. Sprawna kamera 0 może potrzebować 5–10 sekund.');
+    let pendingStream = null;
     try {
-      // Uruchamiamy kamerę bezpośrednio przez przeglądarkę.
-      const selectedId = $('cameraSelect').value;
-      const videoConstraint = selectedId
-        ? { deviceId: { exact: selectedId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-        : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } };
-
-      activeStream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraint,
-        audio: false
+      const { chosen } = await populateCameras();
+      if (launch !== launchNumber) return;
+      if (!chosen || !chosen.deviceId) {
+        throw new Error('Nie można bezpiecznie rozpoznać kamery 0. Otwórz ponownie test WebRTC, zezwól na aparat i wróć tutaj. Nie uruchamiam kamery losowo.');
+      }
+      const selected = $('cameraSelect').selectedOptions[0];
+      if (selected && selected.disabled) throw new Error('Kamera 2 jest zablokowana — wybierz camera 0, facing back.');
+      status('Otwieram: ' + (selected ? selected.textContent : 'wybrana kamera') + '. Poczekaj około 10 sekund…');
+      // Celowo NIE używamy facingMode: environment ani wysokiej rozdzielczości.
+      // Otwieramy dokładnie wybraną, sprawną kamerę.
+      pendingStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { deviceId: { exact: chosen.deviceId } }
       });
-
+      if (launch !== launchNumber) {
+        pendingStream.getTracks().forEach(t => t.stop());
+        return;
+      }
+      activeStream = pendingStream;
       const video = $('preview');
       video.muted = true;
       video.autoplay = true;
       video.playsInline = true;
-      video.setAttribute('playsinline', '');
       video.srcObject = activeStream;
       await video.play();
-
-      // Uzupełniamy listę kamer i zaznaczamy aktywną.
-      try {
-        const devices = await ZXingBrowser.BrowserCodeReader.listVideoInputDevices();
-        const actualId = activeStream.getVideoTracks()[0]?.getSettings()?.deviceId || selectedId;
-        const select = $('cameraSelect');
-        select.innerHTML = '';
-        devices.forEach((device, index) => {
-          const option = document.createElement('option');
-          option.value = device.deviceId;
-          option.textContent = device.label || ('Kamera ' + (index + 1));
-          select.appendChild(option);
-        });
-        if (actualId) select.value = actualId;
-      } catch (_) {}
-
-      if (!window.ZXingBrowser || !ZXingBrowser.BrowserMultiFormatReader) {
-        throw new Error('Nie udało się załadować biblioteki ZXing.');
-      }
-
-      codeReader = new ZXingBrowser.BrowserMultiFormatReader();
+      if (launch !== launchNumber) return;
       $('cameraPlaceholder').classList.add('hidden');
-      status('Obraz z kamery działa. Uruchamiam rozpoznawanie kodów…');
-
-      // ZXing analizuje już działający obraz wideo.
-      cameraControls = await codeReader.decodeFromVideoElement(
-        video,
-        (result, error, controls) => {
-          if (result && !busy) {
-            const textValue = result.getText ? result.getText() : String(result.text || result);
-            onScanSuccess(textValue);
-          }
+      status('Obraz działa. Uruchamiam rozpoznawanie ISBN…');
+      if (!window.ZXingBrowser || !ZXingBrowser.BrowserMultiFormatReader) {
+        throw new Error('Nie załadowano ZXing. Sprawdź połączenie internetowe.');
+      }
+      codeReader = new ZXingBrowser.BrowserMultiFormatReader();
+      cameraControls = await codeReader.decodeFromVideoElement(video, (result) => {
+        if (result && !busy && launch === launchNumber) {
+          onScanSuccess(result.getText ? result.getText() : String(result.text || result));
         }
-      );
-      status('Kamera działa. Umieść kod ISBN w zielonej ramce.');
+      });
+      if (launch === launchNumber) status('Kamera działa. Ustaw kod ISBN w zielonej ramce.');
     } catch (err) {
-      if (cameraControls) {
-        try { cameraControls.stop(); } catch (_) {}
-      }
+      if (launch !== launchNumber) return;
+      try { if (cameraControls) cameraControls.stop(); } catch (_) {}
       cameraControls = null;
-      if (activeStream) {
-        activeStream.getTracks().forEach(track => track.stop());
-      }
+      if (activeStream) activeStream.getTracks().forEach(t => t.stop());
+      if (pendingStream && pendingStream !== activeStream) pendingStream.getTracks().forEach(t => t.stop());
       activeStream = null;
-      const video = $('preview');
-      video.srcObject = null;
+      $('preview').srcObject = null;
       $('startBtn').disabled = false;
       $('stopBtn').disabled = true;
       $('cameraPlaceholder').classList.remove('hidden');
-      $('cameraPlaceholder').textContent = 'Nie udało się uruchomić podglądu kamery.';
-      status('Błąd uruchamiania kamery/skanera: ' +
-        (err && err.message ? err.message : String(err)) +
-        '\nJeśli pojawi się ten komunikat ponownie, prześlij jego pełną treść.');
+      $('cameraPlaceholder').textContent = 'Nie udało się uruchomić podglądu.';
+      status('Błąd kamery: ' + (err?.message || String(err)));
     }
   }
 
   async function stopScanner() {
+    ++launchNumber;
     try { if (cameraControls) cameraControls.stop(); } catch (_) {}
     cameraControls = null;
     try { if (codeReader && codeReader.reset) codeReader.reset(); } catch (_) {}
@@ -250,6 +258,7 @@
   }
 
   async function onScanSuccess(decodedText) {
+    ++launchNumber;
     if (busy) return;
     const isbn = String(decodedText).replace(/[^0-9Xx]/g, '').toUpperCase();
     if (!isValidIsbn(isbn)) {
@@ -316,7 +325,7 @@
   }
 
   function clearIsbn() { $('isbn').value = ''; status('Pole ISBN wyczyszczone.'); }
-  window.addEventListener('load', loadSettings);
+  window.addEventListener('load', () => { loadSettings(); populateCameras().catch(() => {}); });
 </script>
 </body>
 </html>

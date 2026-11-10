@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#173b2a">
+  <title>Moja Biblioteka — skaner ISBN</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    :root { color-scheme: light; --green:#173b2a; --pale:#edf5ef; --line:#d6e0d8; }
+    * { box-sizing:border-box }
+    body { margin:0; font-family:system-ui,Arial,sans-serif; background:#f5f7f5; color:#17231b; }
+    header { background:var(--green); color:white; padding:18px 16px; }
+    header h1 { font-size:21px; margin:0 0 4px; }
+    header p { margin:0; opacity:.85; font-size:13px; }
+    main { max-width:620px; margin:auto; padding:16px; }
+    .card { background:white; border:1px solid var(--line); border-radius:16px; padding:16px; margin-bottom:14px; box-shadow:0 2px 8px #183b2910; }
+    label { display:block; font-size:13px; font-weight:650; margin:10px 0 5px; }
+    input { width:100%; min-height:46px; padding:10px 12px; border:1px solid #b9c8bd; border-radius:10px; font-size:16px; background:white; }
+    button { border:0; border-radius:11px; padding:13px 16px; min-height:46px; font-size:15px; font-weight:700; cursor:pointer; }
+    .primary { background:var(--green); color:white; width:100%; }
+    .secondary { background:var(--pale); color:var(--green); }
+    .row { display:flex; gap:9px; }
+    .row button { flex:1; }
+    #reader { width:100%; overflow:hidden; border-radius:12px; }
+    #reader video { border-radius:12px; }
+    #status { padding:12px; background:var(--pale); border-radius:10px; font-size:14px; min-height:44px; margin-top:12px; white-space:pre-wrap; }
+    .small { color:#5b6b60; font-size:12px; line-height:1.5; }
+    details summary { font-weight:700; cursor:pointer; }
+    .hidden { display:none; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>📚 Moja Biblioteka</h1>
+  <p>Skaner kodów ISBN • Android</p>
+</header>
+<main>
+  <section class="card">
+    <div class="row">
+      <button class="primary" id="startBtn" onclick="startScanner()">Uruchom aparat i skanuj</button>
+      <button class="secondary" id="stopBtn" onclick="stopScanner()" disabled>Stop</button>
+    </div>
+    <div id="reader" style="margin-top:14px"></div>
+    <div id="status" role="status">Wpisz ustawienia po rozwinięciu sekcji poniżej, a następnie uruchom aparat.</div>
+    <p class="small">Ustaw tylny aparat telefonu, skieruj go na kod kreskowy z tyłu książki. Po każdym odczycie skaner zatrzyma się na chwilę, aby uniknąć wielokrotnego dodania tej samej pozycji.</p>
+  </section>
+
+  <section class="card">
+    <label for="isbn">ISBN — możesz też wpisać ręcznie</label>
+    <input id="isbn" inputmode="numeric" autocomplete="off" placeholder="np. 9788324061234">
+    <div class="row" style="margin-top:10px">
+      <button class="primary" onclick="submitManual()">Dodaj ISBN</button>
+      <button class="secondary" onclick="clearIsbn()">Wyczyść</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <label for="shelf">Regał (opcjonalnie)</label>
+    <input id="shelf" placeholder="np. Regał A">
+    <label for="position">Półka (opcjonalnie)</label>
+    <input id="position" placeholder="np. Półka 2">
+  </section>
+
+  <section class="card">
+    <details>
+      <summary>Ustawienia połączenia (konfiguracja jednorazowa)</summary>
+      <label for="endpoint">Adres aplikacji internetowej Apps Script</label>
+      <input id="endpoint" placeholder="https://script.google.com/macros/s/.../exec">
+      <label for="token">Prywatny token zapisu</label>
+      <input id="token" type="password" autocomplete="off" placeholder="Wklej token z Apps Script">
+      <button class="primary" style="margin-top:12px" onclick="saveSettings()">Zapisz ustawienia na tym telefonie</button>
+      <p class="small">Adres i token są zapisywane lokalnie w przeglądarce tego telefonu. Nie umieszczaj tokenu w publicznym kodzie strony ani nie udostępniaj go innym osobom.</p>
+    </details>
+  </section>
+  <p class="small">Wymagane połączenie z internetem. Aparat działa w bezpiecznym kontekście HTTPS. Dane biblioteki są zapisywane w Twoim arkuszu Google.</p>
+</main>
+
+<!-- Formularz wysyłany do Apps Script w ukrytej ramce — omija ograniczenia CORS. -->
+<iframe name="postFrame" id="postFrame" class="hidden"></iframe>
+<form id="postForm" method="post" target="postFrame" class="hidden">
+  <input name="isbn" id="postIsbn">
+  <input name="token" id="postToken">
+  <input name="shelf" id="postShelf">
+  <input name="position" id="postPosition">
+</form>
+
+<script>
+  let scanner = null;
+  let busy = false;
+  const $ = id => document.getElementById(id);
+  const status = message => $('status').textContent = message;
+
+  function loadSettings() {
+    $('endpoint').value = localStorage.getItem('library_endpoint') || '';
+    $('token').value = localStorage.getItem('library_token') || '';
+  }
+  function saveSettings() {
+    const endpoint = $('endpoint').value.trim();
+    const token = $('token').value.trim();
+    if (!endpoint.startsWith('https://script.google.com/macros/s/') || !endpoint.endsWith('/exec')) {
+      status('Sprawdź adres wdrożenia Apps Script. Powinien kończyć się na /exec.');
+      return;
+    }
+    if (!token) { status('Wklej prywatny token.'); return; }
+    localStorage.setItem('library_endpoint', endpoint);
+    localStorage.setItem('library_token', token);
+    status('Ustawienia zapisane na tym telefonie.');
+  }
+
+  async function startScanner() {
+    if (!window.Html5Qrcode) {
+      status('Nie udało się załadować biblioteki skanera. Sprawdź internet i odśwież stronę.');
+      return;
+    }
+    if (!localStorage.getItem('library_endpoint') || !localStorage.getItem('library_token')) {
+      status('Najpierw uzupełnij adres Apps Script i token w sekcji Ustawienia.');
+      return;
+    }
+    try {
+      scanner = scanner || new Html5Qrcode('reader');
+      $('startBtn').disabled = true;
+      $('stopBtn').disabled = false;
+      status('Uruchamiam aparat… Jeśli przeglądarka zapyta o dostęp do kamery, wybierz Zezwól.');
+      await scanner.start(
+        { facingMode: 'environment' },
+        { fps: 10, qrbox: { width: 280, height: 150 },
+          formatsToSupport: [Html5QrcodeSupportedFormats.EAN_13, Html5QrcodeSupportedFormats.EAN_8, Html5QrcodeSupportedFormats.UPC_A] },
+        onScanSuccess,
+        () => {}
+      );
+      status('Aparat działa. Ustaw kod kreskowy w polu skanowania.');
+    } catch (err) {
+      $('startBtn').disabled = false;
+      $('stopBtn').disabled = true;
+      status('Nie można uruchomić aparatu: ' + err + '\nSprawdź uprawnienia kamery i otwórz stronę w Chrome przez HTTPS.');
+    }
+  }
+
+  async function stopScanner() {
+    if (scanner && scanner.isScanning) {
+      try { await scanner.stop(); } catch (e) {}
+    }
+    $('startBtn').disabled = false;
+    $('stopBtn').disabled = true;
+    status('Skaner zatrzymany.');
+  }
+
+  async function onScanSuccess(decodedText) {
+    if (busy) return;
+    const isbn = String(decodedText).replace(/[^0-9Xx]/g, '').toUpperCase();
+    if (!isValidIsbn(isbn)) {
+      status('Odczytano kod, ale nie wygląda na prawidłowy ISBN: ' + decodedText);
+      return;
+    }
+    busy = true;
+    $('isbn').value = isbn;
+    await stopScanner();
+    sendIsbn(isbn);
+  }
+
+  function isValidIsbn(s) {
+    if (/^\d{13}$/.test(s)) {
+      let sum = 0;
+      for (let i = 0; i < 12; i++) sum += Number(s[i]) * (i % 2 ? 3 : 1);
+      return (10 - sum % 10) % 10 === Number(s[12]);
+    }
+    if (/^\d{9}[\dX]$/.test(s)) {
+      let sum = 0;
+      for (let i = 0; i < 10; i++) sum += (s[i] === 'X' ? 10 : Number(s[i])) * (10 - i);
+      return sum % 11 === 0;
+    }
+    return false;
+  }
+
+  function sendIsbn(isbn) {
+    const endpoint = localStorage.getItem('library_endpoint');
+    const token = localStorage.getItem('library_token');
+    if (!endpoint || !token) {
+      status('Brak ustawień połączenia. Otwórz Ustawienia.');
+      busy = false;
+      return;
+    }
+    $('postForm').action = endpoint;
+    $('postIsbn').value = isbn;
+    $('postToken').value = token;
+    $('postShelf').value = $('shelf').value.trim();
+    $('postPosition').value = $('position').value.trim();
+    $('postForm').submit();
+    status('Wysłano ISBN ' + isbn + ' do arkusza. Poczekaj chwilę i sprawdź zakładkę Biblioteka. Każdy skan tworzy osobny egzemplarz.');
+    setTimeout(() => { busy = false; }, 2500);
+  }
+
+  function submitManual() {
+    const isbn = $('isbn').value.replace(/[^0-9Xx]/g, '').toUpperCase();
+    if (!isValidIsbn(isbn)) { status('Wpisany numer nie jest prawidłowym ISBN-10 lub ISBN-13.'); return; }
+    if (busy) return;
+    busy = true;
+    sendIsbn(isbn);
+    setTimeout(() => { busy = false; }, 2500);
+  }
+  function clearIsbn() { $('isbn').value = ''; status('Pole ISBN wyczyszczone.'); }
+  window.addEventListener('load', loadSettings);
+</script>
+</body>
+</html>

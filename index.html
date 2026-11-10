@@ -1,3 +1,4 @@
+
 <!doctype html>
 <html lang="pl">
 <head>
@@ -5,7 +6,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#173b2a">
   <title>Moja Biblioteka — skaner ISBN</title>
-  <!-- ZXing Browser: obsługa kamery i kodów kreskowych w przeglądarce -->
   <script src="https://unpkg.com/@zxing/browser@latest"></script>
   <style>
     :root { color-scheme: light; --green:#173b2a; --pale:#edf5ef; --line:#d6e0d8; }
@@ -103,6 +103,7 @@
 <script>
   let codeReader = null;
   let cameraControls = null;
+  let activeStream = null;
   let busy = false;
   const $ = id => document.getElementById(id);
   const status = message => $('status').textContent = message;
@@ -152,15 +153,55 @@
     }
     $('startBtn').disabled = true;
     $('stopBtn').disabled = false;
-    $('cameraPlaceholder').textContent = 'Uruchamiam kamerę…';
-    status('Wykrywam kamery i uruchamiam podgląd…');
+    $('cameraPlaceholder').classList.remove('hidden');
+    $('cameraPlaceholder').textContent = 'Proszę czekać — uruchamiam aparat…';
+    status('Proszę czekać — proszę o dostęp do kamery…');
+
     try {
-      const devices = await populateCameras();
-      const chosenId = $('cameraSelect').value || (devices[0] && devices[0].deviceId);
-      codeReader = new ZXingBrowser.BrowserMultiFormatReader();
+      // Uruchamiamy kamerę bezpośrednio przez przeglądarkę.
+      const selectedId = $('cameraSelect').value;
+      const videoConstraint = selectedId
+        ? { deviceId: { exact: selectedId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+        : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } };
+
+      activeStream = await navigator.mediaDevices.getUserMedia({
+        video: videoConstraint,
+        audio: false
+      });
+
       const video = $('preview');
-      cameraControls = await codeReader.decodeFromVideoDevice(
-        chosenId,
+      video.muted = true;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.setAttribute('playsinline', '');
+      video.srcObject = activeStream;
+      await video.play();
+
+      // Uzupełniamy listę kamer i zaznaczamy aktywną.
+      try {
+        const devices = await ZXingBrowser.BrowserCodeReader.listVideoInputDevices();
+        const actualId = activeStream.getVideoTracks()[0]?.getSettings()?.deviceId || selectedId;
+        const select = $('cameraSelect');
+        select.innerHTML = '';
+        devices.forEach((device, index) => {
+          const option = document.createElement('option');
+          option.value = device.deviceId;
+          option.textContent = device.label || ('Kamera ' + (index + 1));
+          select.appendChild(option);
+        });
+        if (actualId) select.value = actualId;
+      } catch (_) {}
+
+      if (!window.ZXingBrowser || !ZXingBrowser.BrowserMultiFormatReader) {
+        throw new Error('Nie udało się załadować biblioteki ZXing.');
+      }
+
+      codeReader = new ZXingBrowser.BrowserMultiFormatReader();
+      $('cameraPlaceholder').classList.add('hidden');
+      status('Obraz z kamery działa. Uruchamiam rozpoznawanie kodów…');
+
+      // ZXing analizuje już działający obraz wideo.
+      cameraControls = await codeReader.decodeFromVideoElement(
         video,
         (result, error, controls) => {
           if (result && !busy) {
@@ -169,17 +210,25 @@
           }
         }
       );
-      $('cameraPlaceholder').classList.add('hidden');
       status('Kamera działa. Umieść kod ISBN w zielonej ramce.');
     } catch (err) {
+      if (cameraControls) {
+        try { cameraControls.stop(); } catch (_) {}
+      }
+      cameraControls = null;
+      if (activeStream) {
+        activeStream.getTracks().forEach(track => track.stop());
+      }
+      activeStream = null;
+      const video = $('preview');
+      video.srcObject = null;
       $('startBtn').disabled = false;
       $('stopBtn').disabled = true;
       $('cameraPlaceholder').classList.remove('hidden');
       $('cameraPlaceholder').textContent = 'Nie udało się uruchomić podglądu kamery.';
-      status('Problem z uruchomieniem skanera: ' + (err && err.message ? err.message : err) +
-        '\nSprawdź uprawnienia kamery i połączenie z internetem. Możesz nadal wpisywać ISBN ręcznie.');
-      try { if (cameraControls) cameraControls.stop(); } catch (_) {}
-      cameraControls = null;
+      status('Błąd uruchamiania kamery/skanera: ' +
+        (err && err.message ? err.message : String(err)) +
+        '\nJeśli pojawi się ten komunikat ponownie, prześlij jego pełną treść.');
     }
   }
 
@@ -188,6 +237,11 @@
     cameraControls = null;
     try { if (codeReader && codeReader.reset) codeReader.reset(); } catch (_) {}
     codeReader = null;
+    if (activeStream) {
+      activeStream.getTracks().forEach(track => track.stop());
+      activeStream = null;
+    }
+    $('preview').srcObject = null;
     $('startBtn').disabled = false;
     $('stopBtn').disabled = true;
     $('cameraPlaceholder').classList.remove('hidden');
@@ -208,6 +262,11 @@
     cameraControls = null;
     try { if (codeReader && codeReader.reset) codeReader.reset(); } catch (_) {}
     codeReader = null;
+    if (activeStream) {
+      activeStream.getTracks().forEach(track => track.stop());
+      activeStream = null;
+    }
+    $('preview').srcObject = null;
     $('startBtn').disabled = false;
     $('stopBtn').disabled = true;
     $('cameraPlaceholder').classList.remove('hidden');
